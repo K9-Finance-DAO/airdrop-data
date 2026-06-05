@@ -8,6 +8,8 @@ The input CSV is preserved. The output CSV keeps the input columns and appends:
     smart_contract_ethereum
     holds_zero_eth
     has_zero_ethereum_tx
+    holds_less_than_5_bone
+    holds_less_than_10_bone
 """
 from __future__ import annotations
 
@@ -28,11 +30,14 @@ from snapshot import DEFAULT_RPC_URL, HTTP_TIMEOUT_SECS, normalize_address, to_h
 
 DEFAULT_ETHEREUM_RPC_URL = "https://ethereum.publicnode.com"
 DEFAULT_KNBONE_SNAPSHOT_BLOCK = 17_555_555
+BONE_WEI = 10**18
 OUTPUT_COLUMNS = (
     "smart_contract_shibarium",
     "smart_contract_ethereum",
     "holds_zero_eth",
     "has_zero_ethereum_tx",
+    "holds_less_than_5_bone",
+    "holds_less_than_10_bone",
 )
 
 
@@ -86,6 +91,7 @@ def scan_address(address: str, shibarium_url: str, ethereum_url: str, shibarium_
 
     eth_code = has_code(ethereum, address, "latest")
     shibarium_code = has_code(shibarium, address, shibarium_block_tag)
+    bone_balance = int(str(shibarium.call("eth_getBalance", [address, shibarium_block_tag])), 16)
     eth_balance = int(str(ethereum.call("eth_getBalance", [address, "latest"])), 16)
     eth_tx_count = int(str(ethereum.call("eth_getTransactionCount", [address, "latest"])), 16)
 
@@ -94,6 +100,8 @@ def scan_address(address: str, shibarium_url: str, ethereum_url: str, shibarium_
         "smart_contract_ethereum": parse_bool(eth_code),
         "holds_zero_eth": parse_bool(eth_balance == 0),
         "has_zero_ethereum_tx": parse_bool(eth_tx_count == 0),
+        "holds_less_than_5_bone": parse_bool(bone_balance < 5 * BONE_WEI),
+        "holds_less_than_10_bone": parse_bool(bone_balance < 10 * BONE_WEI),
     }
 
 

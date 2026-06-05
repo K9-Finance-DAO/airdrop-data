@@ -60,8 +60,9 @@ range with `--log-chunk-start`, `--log-chunk-add`, and `--log-chunk-max`.
 
 `scan_knbone_addresses.py` preserves the input CSV and writes an enriched copy
 with `smart_contract_shibarium`, `smart_contract_ethereum`, `holds_zero_eth`,
-and `has_zero_ethereum_tx`. Shibarium contract detection uses `--shibarium-block`;
-Ethereum checks use latest state from `ETHEREUM_RPC_URL`.
+`has_zero_ethereum_tx`, `holds_less_than_5_bone`, and
+`holds_less_than_10_bone`. Shibarium contract and native BONE balance checks use
+`--shibarium-block`; Ethereum checks use latest state from `ETHEREUM_RPC_URL`.
 
 ### Env vars
 
