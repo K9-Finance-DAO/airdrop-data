@@ -14,11 +14,12 @@ snapshot block is chosen).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from tqdm.auto import tqdm
 
@@ -26,16 +27,153 @@ from snapshot import (
     DEFAULT_RPC_URL,
     DEFAULT_SNAPSHOT_BLOCK,
     DEFAULT_START_BLOCK,
+    LOG_CHUNK_ADD,
+    LOG_CHUNK_MAX,
+    LOG_CHUNK_MIN,
+    LOG_CHUNK_MULTIPLIER_DOWN,
+    LOG_CHUNK_START,
+    LOG_FAIL_STREAK_LIMIT,
     MAX_WORKERS,
     Rpc,
     Token,
+    ZERO_ADDRESS,
     normalize_address,
-    scan_token_transfer_recipients,
+    topic_to_address,
     tprint,
     write_airdrop_csv,
 )
 
 KNBONE = Token("knbone", "knBONE", "0x3358FCA51d7C0408750FBbE7777012E0b67C027F")
+
+
+def _checkpoint_config(start_block: int, snapshot_block: int) -> Dict[str, object]:
+    return {
+        "token": KNBONE.symbol,
+        "tokenAddress": KNBONE.address.lower(),
+        "startBlock": start_block,
+        "snapshotBlock": snapshot_block,
+    }
+
+
+def _write_checkpoint(
+    path: Path,
+    start_block: int,
+    snapshot_block: int,
+    next_block: int,
+    addresses: Set[str],
+    *,
+    complete: bool,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        **_checkpoint_config(start_block, snapshot_block),
+        "nextBlock": next_block,
+        "complete": complete,
+        "addresses": sorted(addresses),
+    }
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    tmp.replace(path)
+
+
+def _load_checkpoint(
+    path: Path, start_block: int, snapshot_block: int
+) -> Tuple[int, Set[str], bool]:
+    data = json.loads(path.read_text())
+    expected = _checkpoint_config(start_block, snapshot_block)
+    for key, value in expected.items():
+        if data.get(key) != value:
+            raise ValueError(
+                f"{path} does not match this run: {key}={data.get(key)!r}, expected {value!r}"
+            )
+
+    next_block = int(data.get("nextBlock", start_block))
+    if next_block < start_block or next_block > snapshot_block + 1:
+        raise ValueError(f"{path} has invalid nextBlock={next_block}")
+
+    addresses = {
+        addr
+        for addr in (normalize_address(item) for item in data.get("addresses", []))
+        if addr
+    }
+    return next_block, addresses, bool(data.get("complete"))
+
+
+def scan_knbone_transfer_recipients(
+    rpc: Rpc,
+    start_block: int,
+    snapshot_block: int,
+    checkpoint_file: Optional[Path],
+    *,
+    resume: bool,
+    chunk_start: int,
+    chunk_add: int,
+    chunk_max: int,
+) -> Set[str]:
+    receivers: Set[str] = set()
+    current = start_block
+
+    if checkpoint_file and resume and checkpoint_file.exists():
+        current, receivers, complete = _load_checkpoint(checkpoint_file, start_block, snapshot_block)
+        tprint(
+            f"  resumed {checkpoint_file}: next block {current:,}, "
+            f"{len(receivers):,} addresses"
+        )
+        if complete:
+            return receivers
+
+    chunk = max(LOG_CHUNK_MIN, min(chunk_start, chunk_max))
+    fail_streak = 0
+    total = max(0, snapshot_block - start_block + 1)
+    completed = max(0, min(current, snapshot_block + 1) - start_block)
+
+    with tqdm(total=total, initial=completed, desc=f"logs {KNBONE.symbol}", unit="blk") as pbar:
+        while current <= snapshot_block:
+            end = min(snapshot_block, current + chunk - 1)
+            try:
+                logs = rpc.get_logs(KNBONE.address, current, end, KNBONE.symbol)
+            except Exception as exc:
+                fail_streak += 1
+                if chunk <= LOG_CHUNK_MIN and fail_streak >= LOG_FAIL_STREAK_LIMIT:
+                    raise RuntimeError(
+                        f"{KNBONE.symbol}: {LOG_FAIL_STREAK_LIMIT} consecutive failures at min chunk; aborting"
+                    ) from exc
+                chunk = max(LOG_CHUNK_MIN, int(chunk * LOG_CHUNK_MULTIPLIER_DOWN))
+                tprint(f"  {KNBONE.symbol}: getLogs failed near {current} ({exc}); chunk -> {chunk}")
+                continue
+
+            fail_streak = 0
+            for log in logs:
+                topics = log.get("topics", [])
+                if len(topics) >= 3:
+                    addr = normalize_address(topic_to_address(topics[2]))
+                    if addr and addr != ZERO_ADDRESS:
+                        receivers.add(addr)
+
+            advanced = end - current + 1
+            current = end + 1
+            pbar.update(advanced)
+            if checkpoint_file:
+                _write_checkpoint(
+                    checkpoint_file,
+                    start_block,
+                    snapshot_block,
+                    current,
+                    receivers,
+                    complete=False,
+                )
+            chunk = min(chunk_max, chunk + chunk_add)
+
+    if checkpoint_file:
+        _write_checkpoint(
+            checkpoint_file,
+            start_block,
+            snapshot_block,
+            snapshot_block + 1,
+            receivers,
+            complete=True,
+        )
+    return receivers
 
 
 def fetch_knbone_balances(
@@ -79,6 +217,35 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
                    help="parallel balanceOf workers")
     p.add_argument("--addresses-file", type=Path, default=None,
                    help="optional newline-delimited address list to use INSTEAD of scanning logs")
+    p.add_argument(
+        "--checkpoint-file",
+        type=Path,
+        default=None,
+        help="log scan checkpoint file. Default: <out-dir>/knbone-scan-checkpoint.json",
+    )
+    p.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="ignore an existing checkpoint and rescan from start-block",
+    )
+    p.add_argument(
+        "--log-chunk-start",
+        type=int,
+        default=int(os.environ.get("KNBONE_LOG_CHUNK_START", LOG_CHUNK_START)),
+        help="initial eth_getLogs block range size",
+    )
+    p.add_argument(
+        "--log-chunk-add",
+        type=int,
+        default=int(os.environ.get("KNBONE_LOG_CHUNK_ADD", LOG_CHUNK_ADD)),
+        help="block range size increase after each successful eth_getLogs call",
+    )
+    p.add_argument(
+        "--log-chunk-max",
+        type=int,
+        default=int(os.environ.get("KNBONE_LOG_CHUNK_MAX", LOG_CHUNK_MAX)),
+        help="maximum eth_getLogs block range size",
+    )
     return p.parse_args(argv)
 
 
@@ -93,6 +260,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     tprint(f"snapshot block: {args.snapshot_block:,}")
     tprint(f"out dir:        {args.out_dir}")
     tprint(f"token:          {KNBONE.symbol} @ {KNBONE.address}")
+    checkpoint_file = args.checkpoint_file or (args.out_dir / "knbone-scan-checkpoint.json")
+    tprint(f"checkpoint:     {checkpoint_file}")
 
     rpc = Rpc(args.rpc_url)
 
@@ -105,7 +274,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 addresses.add(addr)
     else:
         tprint("\nStep 1/3: scanning knBONE Transfer logs...")
-        addresses = scan_token_transfer_recipients(rpc, KNBONE, args.start_block, args.snapshot_block)
+        addresses = scan_knbone_transfer_recipients(
+            rpc,
+            args.start_block,
+            args.snapshot_block,
+            checkpoint_file,
+            resume=not args.no_resume,
+            chunk_start=args.log_chunk_start,
+            chunk_add=args.log_chunk_add,
+            chunk_max=args.log_chunk_max,
+        )
     tprint(f"  {len(addresses):,} unique addresses")
 
     tprint("\nStep 2/3: fetching knBONE balanceOf at snapshot block...")

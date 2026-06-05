@@ -18,7 +18,7 @@ The two airdrop CSVs match the format the wizard's upload step accepts
 ## Run
 
 ```bash
-cd scripts/shibarium-snapshot
+cd scripts
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -46,6 +46,12 @@ python snapshot.py \
 KNBONE_SNAPSHOT_BLOCK=15876116 python knbone_snapshot.py
 ```
 
+`knbone_snapshot.py` writes `<out-dir>/knbone-scan-checkpoint.json` while
+scanning logs. If the process is interrupted or the RPC fails, rerun the same
+command and it resumes from the checkpoint's `nextBlock`. Use `--no-resume` to
+force a fresh scan. For RPCs that reject larger `eth_getLogs` ranges, cap the
+range with `--log-chunk-start`, `--log-chunk-add`, and `--log-chunk-max`.
+
 ### Env vars
 
 | Var                            | Purpose                                              | Default      |
@@ -54,6 +60,9 @@ KNBONE_SNAPSHOT_BLOCK=15876116 python knbone_snapshot.py
 | `SHIBARIUM_START_BLOCK`        | first block scanned for Transfer logs                | `1`          |
 | `SHIBARIUM_SUNSET_SNAPSHOT_BLOCK` | snapshot block for `snapshot.py` (KNINE family)    | `15876116`   |
 | `KNBONE_SNAPSHOT_BLOCK`        | snapshot block for `knbone_snapshot.py` (placeholder until a real block is chosen) | `15876116` |
+| `KNBONE_LOG_CHUNK_START`       | initial knBONE `eth_getLogs` block range size        | `5000`       |
+| `KNBONE_LOG_CHUNK_ADD`         | knBONE block range increase after successful log calls | `500`      |
+| `KNBONE_LOG_CHUNK_MAX`         | maximum knBONE `eth_getLogs` block range size        | `25000`      |
 
 ## Approach
 
