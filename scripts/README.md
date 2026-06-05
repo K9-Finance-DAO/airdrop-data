@@ -28,6 +28,12 @@ python snapshot.py
 
 # knBONE snapshot → knbone-airdrop.csv
 python knbone_snapshot.py
+
+# knBONE address metadata scan → knbone-airdrop-address-scan.csv
+python scan_knbone_addresses.py \
+    --input ../shibarium-snapshot/knbone-airdrop.csv \
+    --output ../shibarium-snapshot/knbone-airdrop-address-scan.csv \
+    --shibarium-block 17555555
 ```
 
 The defaults match the liquid-staking frontend's env: RPC
@@ -51,6 +57,11 @@ scanning logs. If the process is interrupted or the RPC fails, rerun the same
 command and it resumes from the checkpoint's `nextBlock`. Use `--no-resume` to
 force a fresh scan. For RPCs that reject larger `eth_getLogs` ranges, cap the
 range with `--log-chunk-start`, `--log-chunk-add`, and `--log-chunk-max`.
+
+`scan_knbone_addresses.py` preserves the input CSV and writes an enriched copy
+with `smart_contract_shibarium`, `smart_contract_ethereum`, `holds_zero_eth`,
+and `has_zero_ethereum_tx`. Shibarium contract detection uses `--shibarium-block`;
+Ethereum checks use latest state from `ETHEREUM_RPC_URL`.
 
 ### Env vars
 
